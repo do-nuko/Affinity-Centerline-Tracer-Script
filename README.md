@@ -64,6 +64,10 @@ The script generates centerline vector paths from the selected raster image.
 
 ## Version History
 
+### v4.0.1
+
+Fixed false detection and incorrect coloring in loop detection.
+
 ### v4.0
 
 Added adjustable parameters through a dialog:
