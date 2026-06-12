@@ -1,6 +1,17 @@
 'use strict';
 /**
- * Binary Raster Centerline Tracer for Affinity  v4.0
+ * Binary Raster Centerline Tracer for Affinity  v4.0.1
+ *
+ * v4.0.1: ループ検出の誤検出・誤色を修正。
+ *   [修正1] isClosed をRDP簡略化後のパスで呼ぶように変更。
+ *     簡略化前のスケルトンパスで判定していたため、小さな円形ドット
+ *     （猫の鼻・目など）がループとして誤検出され、SVG上では直線に
+ *     見えるパスが赤く表示されていた。
+ *   [修正2] ノード追加を1本ずつ実行し、参照を取得してからスタイルを
+ *     一括適用（N+1 Undoエントリ）。
+ *     addCmd.newNodes の返却順が挿入順と一致しない場合に
+ *     pathMeta とのインデックスがずれ、ループが青・非ループが赤に
+ *     なる問題を根本解決。
  *
  * v4.0: ダイアログでパラメータを調整可能に。
  *   主要パラメータをUIから変更できます：
@@ -8,7 +19,6 @@
  *   - ヒゲ除去長 (SPUR_LENGTH): 枝分かれした短い末端を除去
  *   - 簡略化精度 (SIMPLIFY): ノード数と形状精度のバランス
  *   - 出力線幅 (STROKE_WIDTH)
- *
  * v3.9.1: getSpreadBaseBox() でスプレッド座標を取得し、
  *   ピクセル座標 → スプレッド座標への変換を適用（座標ズレ修正）。
  *   v3.9: 分岐集合点を幾何学的交点で再計算（adjustJunctionPositions追加）
@@ -17,13 +27,13 @@
  *   v3.7: 分岐クラスタリング試み（Zhang-Suen1px幅のため効果なし）
  *   v3.6: RGBA8をnewなし呼び出しに修正
  *   v3.5: createDefault()+DocumentCommandによるスタイル適用
-*/
+ */
 
 // ── デフォルト値（ダイアログの初期値） ───────────────────────
 const INVERT_DEFAULT      = false;
 const SIMPLIFY_DEFAULT    = 1.5;
-const MIN_PATH_PX_DEFAULT = 20;   // 端キャップ等の短い孤立パスを除去 (px)
-const SPUR_LENGTH_DEFAULT = 8;    // 枝分かれ末端の除去長 (skeleton px)
+const MIN_PATH_PX_DEFAULT = 20;
+const SPUR_LENGTH_DEFAULT = 8;
 const STROKE_WIDTH_DEFAULT= 1.0;
 
 // ── 固定パラメータ ──────────────────────────────────────────
@@ -135,7 +145,7 @@ function traceSkeleton(skel, w, h) {
     return paths;
 }
 
-// ─── 分岐集合点を幾何学的交点で再配置 (v3.9) ─────────────────
+// ─── 分岐集合点を幾何学的交点で再配置 ───────────────────────
 function adjustJunctionPositions(paths, offset, sampleLen) {
     if (!paths.length || offset <= 0 || sampleLen <= 0) return paths;
     const epMap = new Map();
@@ -290,6 +300,10 @@ function rdp(pts, eps) {
 
 const pathLen = pts => { let l=0; for(let i=1;i<pts.length;i++) l+=Math.hypot(pts[i][0]-pts[i-1][0],pts[i][1]-pts[i-1][1]); return l; };
 
+// [修正1] isClosed は簡略化後の simplified パスで呼ぶ。
+// 簡略化前のピクセルパスで判定すると、小さな円形ドットが
+// スケルトン上でリングとして正しく検出されても、RDP後に
+// 2点に潰れて「直線なのに赤」という見た目の誤りが生じる。
 function isClosed(path, tol=2.0) {
     if(path.length<3) return false;
     const p0=path[0],pn=path[path.length-1];
@@ -304,7 +318,7 @@ function main() {
     const doc = app.documents.current;
 
     // ── ダイアログ ──────────────────────────────────────────
-    const dlg = Dialog.create('中心線トレーサー v4.0');
+    const dlg = Dialog.create('中心線トレーサー v4.0.1');
     const col = dlg.addColumn();
 
     const grpBasic = col.addGroup('基本');
@@ -363,17 +377,25 @@ function main() {
         const offY   = bbox.y;
         const toDoc  = ([px, py]) => [offX + px * scaleX, offY + py * scaleY];
 
-        // ── ノード定義を構築 ─────────────────────────────────
-        const acnBuilder = AddChildNodesCommandBuilder.create();
-        const pathMeta   = [];
+        // ── Phase 1: ノードを1本ずつ追加して参照を収集 ──────
+        // [修正2] addCmd.newNodes の返却順が挿入順と保証されないため、
+        // 1本ずつ追加して newNodes[0] で確実に対応ノードを取得する。
+        // スタイル適用は Phase 2 で一括（Undo は N+1 エントリ）。
+        const openFill   = FillDescriptor.createSolid(RGBA8(...OPEN_COLOR));
+        const closedFill = FillDescriptor.createSolid(RGBA8(...CLOSED_COLOR));
+        const lineStyle  = LineStyleDescriptor.createDefault(STROKE_WIDTH);
+
+        const addedNodes = [];  // { node, closed } のリスト
 
         for (const pts of paths) {
             if (pts.length < MIN_LENGTH) continue;
-            const closed     = DETECT_LOOPS && isClosed(pts);
+
             const simplified = SIMPLIFY > 0 ? rdp(pts, SIMPLIFY) : [...pts];
             if (simplified.length < 2) continue;
-            // MIN_PATH_PX: ピクセル空間でのパス長フィルタ（孤立した短いアーティファクト除去）
             if (pathLen(simplified) < MIN_PATH_PX) continue;
+
+            // [修正1] isClosed を簡略化後のパスで判定
+            const closed = DETECT_LOOPS && isClosed(simplified);
 
             const docPts = simplified.map(toDoc);
 
@@ -386,36 +408,31 @@ function main() {
 
             const def = Nodes.PolyCurveNodeDefinition.createDefault();
             def.setCurves(pc);
+
+            const acnBuilder = AddChildNodesCommandBuilder.create();
             acnBuilder.addPolyCurveNode(def);
-            pathMeta.push(closed);
+            const addCmd = acnBuilder.createCommand();
+            doc.executeCommand(addCmd);
+
+            addedNodes.push({ node: addCmd.newNodes[0], closed });
         }
 
-        if (pathMeta.length === 0) {
+        if (addedNodes.length === 0) {
             app.alert('中心線が検出されませんでした。\n画像を確認するか、INVERTや最小パス長を調整してください。', '中心線トレーサー');
             return;
         }
 
-        // ── ノードを一括追加 ────────────────────────────────
-        const addCmd  = acnBuilder.createCommand();
-        doc.executeCommand(addCmd);
-        const newNodes = addCmd.newNodes;
-
-        // ── スタイルを一括適用 ───────────────────────────────
-        const openFill   = FillDescriptor.createSolid(RGBA8(...OPEN_COLOR));
-        const closedFill = FillDescriptor.createSolid(RGBA8(...CLOSED_COLOR));
-        const lineStyle  = LineStyleDescriptor.createDefault(STROKE_WIDTH);
-
+        // ── Phase 2: スタイルを一括適用（Undo 1エントリ） ──
         const styleBuilder = CompoundCommandBuilder.create();
-        for (let i = 0; i < newNodes.length; i++) {
-            const sel  = newNodes[i].selfSelection;
-            const fill = pathMeta[i] ? closedFill : openFill;
-            styleBuilder.addCommand(DocumentCommand.createSetPenFill(sel, fill));
-            styleBuilder.addCommand(DocumentCommand.createSetLineStyleDescriptor(sel, lineStyle));
+        for (const { node, closed } of addedNodes) {
+            const fill = closed ? closedFill : openFill;
+            styleBuilder.addCommand(DocumentCommand.createSetPenFill(node.selfSelection, fill));
+            styleBuilder.addCommand(DocumentCommand.createSetLineStyleDescriptor(node.selfSelection, lineStyle));
         }
         doc.executeCommand(styleBuilder.createCommand());
 
-        const closedCount = pathMeta.filter(Boolean).length;
-        app.alert(`完了: ${pathMeta.length} パス (開 ${pathMeta.length - closedCount}, 閉 ${closedCount})`, '中心線トレーサー');
+        const closedCount = addedNodes.filter(e => e.closed).length;
+        app.alert(`完了: ${addedNodes.length} パス (開 ${addedNodes.length - closedCount}, 閉 ${closedCount})`, '中心線トレーサー');
 
     } catch (e) {
         app.alert('エラー: ' + e.message, '中心線トレーサー');
