@@ -1,6 +1,9 @@
 # Affinity-Centerline-Tracer-Script
 
-Convert raster line art into centerline vector paths in Affinity.  
+This script converts raster line art into editable centerline vector paths in Affinity.  
+It uses binarization, thinning, skeleton tracing, and path simplification to extract the centerline of scanned drawings, sketches, and raster strokes.  
+Parameters such as minimum path length, spur removal length, simplification tolerance, and stroke width can be adjusted via a dialog. Open paths and closed loops are color-coded for easier inspection.  
+
 ![Raster to Centerline](images/raster-to-centerline.png)  
 <img width="1024" height="451" alt="raster-to-centerline2" src="https://github.com/user-attachments/assets/5772b86e-2f26-4062-9358-8c298b8094b2" />  
 
