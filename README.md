@@ -1,7 +1,8 @@
 # Affinity-Centerline-Tracer-Script
 
 Convert raster line art into centerline vector paths in Affinity.
-![Raster to Centerline](images/raster-to-centerline.png)
+![Raster to Centerline](images/raster-to-centerline.png)  
+<img width="1024" height="451" alt="raster-to-centerline2" src="https://github.com/user-attachments/assets/5772b86e-2f26-4062-9358-8c298b8094b2" />  
 
 This script performs:
 
